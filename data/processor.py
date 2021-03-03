@@ -146,7 +146,7 @@ class DataProcessor:
             dataset = ListDataset(instances)
         return dataset
 
-    def read_from_file(self, path: str, data_type: str, tokenizer: bool = True) -> Dataset:
+    def read_from_file(self, path: str, file_name: str, tokenizer: bool = True) -> Dataset:
         '''
         :param path:  data dir
         :param data_type: in 'train' 'dev' 'test '
@@ -154,10 +154,9 @@ class DataProcessor:
         :param tokenizer: whether to tokenizer the instances
         :return:
         '''
-        assert data_type in ['train', 'dev', 'test']
         assert os.path.exists(path) and os.path.isdir(path)
 
-        instances = self.data_reader.get_instances(path, data_type)
+        instances = self.data_reader.get_instances(path, file_name)
 
         dataset = self.convert_instances_to_dataset(instances, tokenizer)
         return dataset

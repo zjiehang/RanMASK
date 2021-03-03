@@ -134,4 +134,5 @@ save_models/
 dataset/
 pretrained/
 .vscode/
+test.py
 *.txt

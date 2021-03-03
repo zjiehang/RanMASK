@@ -14,12 +14,15 @@ from args import ClassifierArgs
 from data.instance import InputInstance
 from data.processor import DataProcessor
 from utils.loss import ContrastiveLearningLoss, UnsupervisedCircleLoss
-from utils.utils import convert_dataset_to_batch,collate_fn, xlnet_collate_fn
-from utils.mask import mask_batch_instances
+from utils.utils import convert_dataset_to_batch,collate_fn, xlnet_collate_fn, build_forbidden_mask_words
+from utils.mask import mask_instance, mask_forbidden_index
+from utils.config import DATASET_TYPE
+from overrides import overrides
 from .base import BaseTrainer
 
 class MaskTrainer(BaseTrainer):
     def __init__(self,
+                 args: ClassifierArgs, 
                  data_processor: DataProcessor,
                  data_loader: DataLoader,
                  model: nn.Module,
@@ -31,40 +34,49 @@ class MaskTrainer(BaseTrainer):
 
         self.data_processor = data_processor
         self.mask_token = self.data_processor.tokenizer.mask_token
+        # self.task = args.task
+        self.forbidden_words = None
+        if args.keep_sentiment_word:
+            self.forbidden_words = build_forbidden_mask_words(args.sentiment_path)
+
+        # for incremental trick
+        # mask rate = initial + Δ * self.global_step
+        # where Δ is the incremental mask rate for each global step
+        self.initial_mask_rate = args.initial_mask_rate
+        self.incremental_trick = args.incremental_trick
+        time_for_epoch = self.training_times_in_epoch(len(data_loader.dataset), args.batch_size)
+        self.delta = (args.sparse_mask_rate - self.initial_mask_rate) / (time_for_epoch * (args.epochs - round(args.epochs * 0.4)))
 
 
-    # def mask_batch(self, batchs: List[InputInstance], mask_rate: float) -> List[InputInstance]:
-    #     mask_instances = []
-    #     for instance in batchs:
-    #         if instance.text_b is None:
-    #             sentence = instance.text_a
-    #         else:
-    #             sentence = instance.text_b
-            
-    #         mask_sentence = self.mask_sentence(sentence, mask_rate)
-
-    #         if instance.text_b is None:
-    #             tmp_instance = InputInstance(instance.guid, text_a=mask_sentence, label=instance.label)
-    #         else:
-    #             tmp_instance = InputInstance(instance.guid, text_a=instance.text_a, text_b=mask_sentence, label=instance.label)
-            
-    #         mask_instances.append(tmp_instance)
-
-    #     return mask_instances
-
-    # def mask_sentence(self, sentence: str, mask_rate: float) -> str:
-    #     sentence_split = sentence.split()
-    #     length = len(sentence_split)
-    #     mask_nums = round(length * mask_rate)
-    #     mask_token_ids = np.random.choice(list(range(length)), size=(mask_nums,),replace=False)
-    #     for token_ids in mask_token_ids:
-    #         sentence_split[token_ids] = self.mask_token
-    #     return ' '.join(sentence_split)
-
+    def training_times_in_epoch(self, data_len: int, batch_size: int) -> int:
+        if data_len % batch_size == 0:
+            return data_len // batch_size
+        else:
+            return data_len // batch_size + 1
+        
+    def cal_sparse_mask_rate(self, sparse_mask_rate):
+        if self.incremental_trick:
+            tmp_mask_rate = self.initial_mask_rate + self.global_step * self.delta
+            if tmp_mask_rate < sparse_mask_rate:
+                return tmp_mask_rate
+            else:
+                return sparse_mask_rate
+        else:
+            return sparse_mask_rate
+        
     def train(self, args: ClassifierArgs, batch: Tuple) -> float:
         assert isinstance(batch[0], InputInstance)
-        mask_instances = mask_batch_instances(batch, args.sparse_mask_rate, self.mask_token)
+        mask_rate = self.cal_sparse_mask_rate(args.sparse_mask_rate)
+        mask_instances = self.mask_batch_instances(batch, mask_rate, self.mask_token)
         train_batch =  self.data_processor.convert_instances_to_dataset(mask_instances, use_tqdm=False)
         train_batch = convert_dataset_to_batch(train_batch, args.model_type)
         return super().train(args, train_batch)
-        
+
+    def mask_batch_instances(self, instances: List[InputInstance], rate: float, token: str, nums: int = 1) -> List[InputInstance]: 
+        batch_instances = []
+        for instance in instances:
+            forbidden_index = None
+            if self.forbidden_words is not None:
+                forbidden_index = mask_forbidden_index(instance.perturbable_sentence(), self.forbidden_words)
+            batch_instances.extend(mask_instance(instance, rate, token, nums, forbidden_indexes=forbidden_index))
+        return batch_instances

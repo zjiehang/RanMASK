@@ -2,7 +2,7 @@ import torch
 from tqdm import tqdm
 from nltk.corpus import words
 from pypinyin import lazy_pinyin
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Set
 from torch.utils.data import TensorDataset
 from transformers import PreTrainedTokenizer
 
@@ -109,3 +109,12 @@ def build_confusion_set(path: str) -> Dict:
             confusion_set[line_split[0]] = line_split[1].split('\t')
             confusion_set[line_split[0]].insert(0, lazy_pinyin(line_split[0])[0])
     return confusion_set
+
+# return type: set, to improve the search complexity. python set: O(1)
+def build_forbidden_mask_words(file_path: str) -> Set[str]:
+    sentiment_words_set = set()
+    with open(file_path, 'r', encoding='utf8') as file:
+        for line in file.readlines():
+            sentiment_words_set.add(line.strip())
+    return sentiment_words_set
+

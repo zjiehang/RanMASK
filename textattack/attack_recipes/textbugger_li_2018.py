@@ -37,7 +37,7 @@ class TextBuggerLi2018(AttackRecipe):
     """
 
     @staticmethod
-    def build(model):
+    def build(model, ensemble: bool = False):
         #
         #  we propose five bug generation methods for TEXTBUGGER:
         #
@@ -94,6 +94,6 @@ class TextBuggerLi2018(AttackRecipe):
         #
         # Greedily swap words with "Word Importance Ranking".
         #
-        search_method = GreedyWordSwapWIR()
+        search_method = GreedyWordSwapWIR(ensemble=ensemble)
 
         return Attack(goal_function, constraints, transformation, search_method)

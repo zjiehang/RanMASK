@@ -136,7 +136,7 @@ class GreedyWordSwapWIR(SearchMethod):
             if results[0].score > cur_result.score:
                 cur_result = results[0]
             else:
-                continue
+                cur_result = np.random.choice(results)
             # If we succeeded, return the index with best similarity.
             if cur_result.goal_status == GoalFunctionResultStatus.SUCCEEDED:
                 best_result = cur_result

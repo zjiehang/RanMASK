@@ -17,7 +17,7 @@ class FreeLBTrainer(EmbeddingLevelGradientTrainer):
                  optimizer: Optimizer,
                  lr_scheduler: _LRScheduler = None,
                  writer: SummaryWriter = None):
-        EmbeddingLevelGradientTrainer.__init__(super, data_loader, model, loss_function, optimizer, lr_scheduler, writer)
+        EmbeddingLevelGradientTrainer.__init__(self, data_loader, model, loss_function, optimizer, lr_scheduler, writer)
 
     def train(self, args: ClassifierArgs, batch: Tuple) -> float:
         assert isinstance(batch[0], torch.Tensor)

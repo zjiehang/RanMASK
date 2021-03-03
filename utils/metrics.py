@@ -2,19 +2,20 @@
 import torch
 import scipy
 import numpy as np
+from typing import List, Dict
 from abc import ABC, abstractmethod
 from functools import lru_cache
 from overrides import overrides
 from sklearn.metrics import f1_score, classification_report
-from typing import Dict
 
+ABSTAIN_FLAG = -1
 BASE_FOR_CLASSIFICATION = ['loss', 'accuracy', 'f1']
 
 class Metric(ABC):
     def __init__(self, compare_key='-loss'):
         compare_key = compare_key.lower()
         if not compare_key.startswith('-') and compare_key[0].isalnum():
-            compare_key = "+".format(compare_key)
+            compare_key = "+{}".format(compare_key)
         self.compare_key = compare_key
 
     def __str__(self):
@@ -95,30 +96,22 @@ class ClassificationMetric(Metric):
 class RandomSmoothAccuracyMetrics(Metric):
     def __init__(self, compare_key='+accuracy'):
         super().__init__(compare_key)
-        self.ABSTAIN_FLAG = -1
         self._all_numbers = 0
         self._abstain_numbers = 0
         self._correct_numbers = 0
 
     @overrides
     def __call__(self,
-                 scores: np.ndarray, 
+                 pred: int,
                  target: int,
-                 alpha: float,
                  ) -> None:
-        label_num = scores.shape[1]
-        preds = np.argmax(scores, axis=-1)
-        votes = np.bincount(preds, minlength=label_num)
-        top_two_idx = np.argsort(votes)[-2:][::-1]
-        top_one_count, top_two_count = votes[top_two_idx[0]], votes[top_two_idx[1]]
-        tests = scipy.stats.binom_test(top_one_count,top_one_count+top_two_count, .5)
-        if tests <= alpha:
-            pred = top_two_idx[0]
-            if target == pred:
-                self._correct_numbers += 1
-        else:
-            self._abstain_numbers += 1
         self._all_numbers += 1
+        if pred == ABSTAIN_FLAG:
+            self._abstain_numbers += 1
+            return 
+
+        if pred == target:
+            self._correct_numbers += 1
 
     @overrides
     def get_metric(self, reset: bool = False) -> Dict:
@@ -134,4 +127,60 @@ class RandomSmoothAccuracyMetrics(Metric):
         self._abstain_numbers = 0
         self._correct_numbers = 0
 
+
+class RandomAblationCertifyMetric(Metric):
+    def __init__(self, compare_key='+accuracy'):
+        super().__init__(compare_key)
+        self._certify_radius = []
+        self._sentence_length = []
+
+    @overrides
+    def __call__(self,
+                 radius: int,
+                 length: int,
+                 ) -> None:
+        '''
+        radius: is nan or integer
+        when radius == nan, predict error 
+        when radius == 0,  predict correct but not certified
+        when radius > 0, predict correct, sentence with perturbed numbers smaller than radius is certified 
+        '''
+        self._certify_radius.append(radius)
+        self._sentence_length.append(length)
+
+    @overrides
+    def get_metric(self, reset: bool = False) -> Dict:
+        # result = {'accuracy': self._correct_numbers / self._all_numbers,
+        #          'abstain': self._abstain_numbers / self._all_numbers}
+        assert len(self._certify_radius) == len(self._sentence_length)
+        radius_rate = [radius / length for radius, length in zip(self._certify_radius, self._sentence_length)]
+        result = {'accuracy': sum(~np.isnan(self._certify_radius))/ len(self._certify_radius),
+                  'median': np.median([-1 if np.isnan(radius) else radius for radius in self._certify_radius]), 
+                  'median(right)': np.nanmedian(self._certify_radius),
+                  'mean': np.nanmean(self._certify_radius),
+                  'median rate': np.median([-1 if np.isnan(rate) else rate for rate in radius_rate]), 
+                  'median rate(right)': np.nanmedian(radius_rate),
+                  'mean rate': np.nanmean(radius_rate)
+        }
+
+        if reset:
+            self.reset()
+        return result
+
+    @overrides
+    def reset(self) -> None:
+        self._certify_radius = []
+        self._sentence_length = []
+
+    def to_str(self, lst: List) -> List:
+        return [str(e) for e in lst]
+
+    def format_list(self, lst: List, num_for_row: int = 50) -> str:
+        return "\n".join([" ".join(self.to_str(lst[i:i+num_for_row])) for i in range(0, len(lst), num_for_row)])
+
+    def certify_radius(self) -> str:
+        return "Certify Radius List : \n{}".format(self.format_list(self._certify_radius))
+
+    def sentence_length(self) -> str:
+        return "Length List: \n{}".format(self.format_list(self._sentence_length))
 

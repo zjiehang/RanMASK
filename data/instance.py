@@ -46,6 +46,18 @@ class InputInstance:
         else:
             return self.text_b
 
+    def is_nli(self):
+        if self.text_b is None:
+            return False
+        else:
+            return True
+
+    def length(self):
+        if self.text_b is None:
+            return len(self.text_a.split())
+        else:
+            return len(self.text_b.split())
+
     @classmethod
     def from_instance_and_perturb_sentence(cls, instance: "InputInstance", perturb_sent: str):
         guid = instance.guid

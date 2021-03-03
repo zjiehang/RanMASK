@@ -89,7 +89,7 @@ def auto_create(name, func, cache=False, path=None):
             save_var(obj, name, path)
     return obj
 
-def set_seed(seed=123):
+def set_seed(seed=None):
     if seed is not None:
         random.seed(seed)
         os.environ['PYTHONHASHSEED'] = str(seed)

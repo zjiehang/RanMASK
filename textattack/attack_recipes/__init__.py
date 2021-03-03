@@ -21,7 +21,7 @@ TextAttack supports the following attack recipes (each recipe's documentation co
 from .attack_recipe import AttackRecipe
 
 from .bae_garg_2019 import BAEGarg2019
-from .bert_attack_li_2020 import BERTAttackLi2020, BERTAttackLi2020WithoutSentenceEncoder
+from .bert_attack_li_2020 import BERTAttackLi2020
 from .genetic_algorithm_alzantot_2018 import GeneticAlgorithmAlzantot2018, GeneticAlgorithmAlzantot2018WithoutLM
 from .faster_genetic_algorithm_jia_2019 import FasterGeneticAlgorithmJia2019, FasterGeneticAlgorithmJia2019WithoutLM
 from .deepwordbug_gao_2018 import DeepWordBugGao2018
@@ -31,7 +31,7 @@ from .kuleshov_2017 import Kuleshov2017
 from .morpheus_tan_2020 import MorpheusTan2020
 from .seq2sick_cheng_2018_blackbox import Seq2SickCheng2018BlackBox
 from .textbugger_li_2018 import TextBuggerLi2018
-from .textfooler_jin_2019 import TextFoolerJin2019, TextFoolerJin2019WithoutSentenceEncoder
+from .textfooler_jin_2019 import TextFoolerJin2019
 from .pwws_ren_2019 import PWWSRen2019
 from .iga_wang_2019 import IGAWang2019
 from .pruthi_2019 import Pruthi2019

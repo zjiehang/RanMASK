@@ -50,10 +50,11 @@ class HotflipTrainer(TokenLevelGradientTrainer):
                  loss_function: _Loss,
                  optimizer: Optimizer,
                  lr_scheduler: _LRScheduler = None,
-                 writer: SummaryWriter = None):
+                 writer: SummaryWriter = None, 
+                 language: str = 'english'):
         TokenLevelGradientTrainer.__init__(self, data_loader, model, loss_function, optimizer, lr_scheduler, writer)
 
-        self.constraints = self.build_constraint(args.language, tokenizer)
+        self.constraints = self.build_constraint(language, tokenizer)
         self.cls_token_id = tokenizer.cls_token_id
         self.sep_token_id = tokenizer.sep_token_id
         self.pad_token_id = tokenizer.pad_token_id
@@ -158,7 +159,7 @@ class HotflipTrainer(TokenLevelGradientTrainer):
             loss.backward()
 
             fw, bw = EmbeddingHook.reading_embedding_hook()
-            replace_num = math.floor(fw.shape[1] * (args.attack_max_rate_for_training / 2))
+            replace_num = math.floor(fw.shape[1] * (args.adv_change_rate))
             current_batch_ids = self.hotflip_attack(current_batch_ids,
                                                     embedding=fw,
                                                     gradient=bw,

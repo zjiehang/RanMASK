@@ -8,7 +8,7 @@ import logging
 import numpy as np
 import torch.nn as nn
 from overrides import overrides
-from typing import List, Any, Dict, Union
+from typing import List, Any, Dict, Union, Tuple
 from tqdm import tqdm
 from torchnlp.samplers.bucket_batch_sampler import BucketBatchSampler
 from torch.utils.data import DataLoader, Dataset
@@ -22,11 +22,11 @@ from data.reader import DataReader
 from data.processor import DataProcessor
 from data.instance import InputInstance
 from data.dataset import ListDataset
-from utils.metrics import Metric, RandomSmoothAccuracyMetrics
+from utils.metrics import Metric, RandomSmoothAccuracyMetrics, RandomAblationCertifyMetric
 from utils.loss import ContrastiveLearningLoss, UnsupervisedCircleLoss
-from utils.mask import mask_instance
+from utils.mask import mask_instance, mask_forbidden_index
 from predictor import Predictor
-from utils.utils import collate_fn, xlnet_collate_fn, convert_batch_to_bert_input_dict
+from utils.utils import collate_fn, xlnet_collate_fn, convert_batch_to_bert_input_dict, build_forbidden_mask_words
 from utils.hook import EmbeddingHook
 from trainer import (BaseTrainer,
                     FreeLBTrainer,
@@ -35,13 +35,16 @@ from trainer import (BaseTrainer,
                     EmbeddingLevelMetricTrainer,
                     TokenLevelMetricTrainer,
                     RepresentationLearningTrainer,
-                    MaskTrainer)
+                    MaskTrainer,
+                    SAFERTrainer
+                    )
 from utils.textattack import build_english_attacker
-from utils.textattack import CustomTextAttackDataset
-from textattack.models.wrappers import HuggingFaceModelWrapper
+from utils.textattack import CustomTextAttackDataset, SimplifidResult
+from textattack.models.wrappers import HuggingFaceModelWrapper, HuggingFaceModelMaskEnsembleWrapper, HuggingFaceModelSaferEnsembleWrapper
 from textattack.loggers.attack_log_manager import AttackLogManager
 from textattack.attack_results import SuccessfulAttackResult, FailedAttackResult
 from utils.public import auto_create
+from utils.certify import predict, lc_bound, population_radius_for_majority, population_radius_for_majority_by_estimating_lambda, population_lambda
 from torch.optim.adamw import AdamW
 
 
@@ -53,14 +56,20 @@ class Classifier:
                         'predict': self.predict, 
                         'attack': self.attack,
                         'augmentation': self.augmentation,
+                        'certify': self.certify,
+                        'statistics': self.statistics
                         }# 'certify': self.certify}
         assert args.mode in self.methods, 'mode {} not found'.format(args.mode)
 
         # for data_reader and processing
         self.data_reader, self.tokenizer, self.data_processor = self.build_data_processor(args)
         self.model = self.build_model(args)
-        self.type_accept_instance_as_input = ['conat', 'sparse']
+        self.type_accept_instance_as_input = ['conat', 'sparse', 'safer']
         self.loss_function = self.build_criterion(args.dataset_name)
+        
+        self.forbidden_words = None
+        if args.keep_sentiment_word:
+            self.forbidden_words = build_forbidden_mask_words(args.sentiment_path)
 
     def save_model_to_file(self, save_dir: str, file_name: str):
         save_file_name = '{}.pth'.format(file_name)
@@ -122,24 +131,16 @@ class Classifier:
     def build_criterion(self, dataset):
         return DATASET_TYPE.get_loss_function(dataset)
 
-    def build_dataset(self, args: ClassifierArgs, data_type: str, tokenizer: bool = True) -> Dataset:
-        # for some training type, when training, the inputs type is Inputstance
-        if data_type == 'train' and args.training_type in self.type_accept_instance_as_input:
-            tokenizer = False
-        
-        file_name = data_type if args.file_name is None else args.file_name
-        dataset = auto_create('{}_max{}{}'.format(file_name, args.max_seq_length, '_tokenizer' if tokenizer else ''),
-                            lambda: self.data_processor.read_from_file(args.dataset_dir, data_type, tokenizer=tokenizer))
-        return dataset
-
     def build_data_loader(self, args: ClassifierArgs, data_type: str, tokenizer: bool = True, **kwargs) -> List[Union[Dataset, DataLoader]]:
         # for some training type, when training, the inputs type is Inputstance
         if data_type == 'train' and args.training_type in self.type_accept_instance_as_input:
             tokenizer = False
         shuffle = True if data_type == 'train' else False
-        file_name = data_type if args.file_name is None else args.file_name
+        file_name = data_type
+        if file_name == 'train' and args.file_name is not None:
+            file_name = args.file_name
         dataset = auto_create('{}_max{}{}'.format(file_name, args.max_seq_length, '_tokenizer' if tokenizer else ''),
-                            lambda: self.data_processor.read_from_file(args.dataset_dir, data_type, tokenizer=tokenizer),
+                            lambda: self.data_processor.read_from_file(args.dataset_dir, file_name, tokenizer=tokenizer),
                             True, args.caching_dir)
         
         # for collate function
@@ -153,9 +154,27 @@ class Classifier:
 
 
     def build_attacker(self, args: ClassifierArgs, **kwargs):
-        model_wrapper = HuggingFaceModelWrapper(self.model, self.tokenizer, batch_size=args.batch_size)
-        self.model_wrapper = model_wrapper
-        return build_english_attacker(args, model_wrapper)
+        if args.training_type == 'sparse' or args.training_type == 'safer':
+            if args.dataset_name in ['agnews', 'imdb']:
+                batch_size = 300
+            else:
+                batch_size = 600
+            if args.training_type == 'sparse':
+                model_wrapper = HuggingFaceModelMaskEnsembleWrapper(args, 
+                                                                    self.model, 
+                                                                    self.tokenizer, 
+                                                                    batch_size=batch_size)
+            else:
+                model_wrapper = HuggingFaceModelSaferEnsembleWrapper(args, 
+                                                                    self.model, 
+                                                                    self.tokenizer, 
+                                                                    batch_size=batch_size)
+        else:
+            model_wrapper = HuggingFaceModelWrapper(self.model, self.tokenizer, batch_size=args.batch_size)
+        
+
+        attacker = build_english_attacker(args, model_wrapper)
+        return attacker
 
     def build_writer(self, args: ClassifierArgs, **kwargs) -> Union[SummaryWriter, None]:
         writer = None
@@ -180,14 +199,17 @@ class Classifier:
             trainer = FreeLBTrainer(data_loader, self.model, self.loss_function, optimizer, lr_scheduler, writer)
         elif args.training_type == 'pgd':
             trainer = PGDTrainer(data_loader, self.model, self.loss_function, optimizer, lr_scheduler, writer)
-        elif args.training_type == 'hotflip':
+        elif args.training_type == 'advhotflip':
             trainer = HotflipTrainer(args, self.tokenizer, data_loader, self.model, self.loss_function, optimizer, lr_scheduler, writer)
         elif args.training_type == 'metric':
             trainer = EmbeddingLevelMetricTrainer(data_loader, self.model, self.loss_function, optimizer, lr_scheduler, writer)
         elif args.training_type == 'metric_token':
             trainer = TokenLevelMetricTrainer(args, self.tokenizer, data_loader, self.model, self.loss_function, optimizer, lr_scheduler, writer)
         elif args.training_type == 'sparse':
-            trainer = MaskTrainer(self.data_processor, data_loader, self.model, self.loss_function, optimizer, lr_scheduler, writer)
+            # trick = True if args.dataset_name in ['mr'] else False
+            trainer = MaskTrainer(args, self.data_processor, data_loader, self.model, self.loss_function, optimizer, lr_scheduler, writer)
+        elif args.training_type == 'safer':
+            trainer = SAFERTrainer(args, self.data_processor, data_loader, self.model, self.loss_function, optimizer, lr_scheduler, writer)
         return trainer
 
     def train(self, args: ClassifierArgs):
@@ -212,7 +234,9 @@ class Classifier:
             if best_metric is None or metric > best_metric:
                 best_metric = metric
                 self.save_model_to_file(args.saving_dir, args.build_saving_file_name(description='best'))
-
+        
+        if args.training_type == 'sparse' and args.incremental_trick and args.saving_last_epoch:
+            self.save_model_to_file(args.saving_dir, args.build_saving_file_name(description='best'))
         self.evaluate(args)
 
     @torch.no_grad()
@@ -282,7 +306,7 @@ class Classifier:
 
         dataset, _ = self.build_data_loader(args, args.evaluation_data_type, tokenizer=False)
         assert isinstance(dataset, ListDataset)
-        if args.predict_numbers is None:
+        if args.predict_numbers == -1:
             predict_dataset = dataset.data
         else:
             predict_dataset = np.random.choice(dataset.data, size=(args.predict_numbers, ), replace=False)
@@ -290,69 +314,47 @@ class Classifier:
         description = tqdm(predict_dataset)
         metric = RandomSmoothAccuracyMetrics()
         for data in description:
-            tmp_instances = mask_instance(data, args.sparse_mask_rate, self.tokenizer.mask_token,nums=args.predict_ensemble)
+            tmp_instances = self.mask_instance_decorator(args, data, args.predict_ensemble)
             tmp_probs = predictor.predict_batch(tmp_instances)
-            label_in_int = self.data_reader.get_label_to_idx(data.label)
-            metric(tmp_probs, label_in_int, args.alpha)
+            target = self.data_reader.get_label_to_idx(data.label)
+            pred = predict(tmp_probs, args.alpha)
+            metric(pred, target)
             description.set_description(metric.__str__())
         print(metric)
         logging.info(metric)
     
     def attack(self, args: ClassifierArgs, **kwargs):
         # self.evaluate(args, is_training=False)
+        # self.evaluate(args, is_training=False)
         self.loading_model_from_file(args.saving_dir, args.build_saving_file_name(description='best'))
+        self.model.eval()
 
-        # predictor = Predictor(self.model, self.data_processor, args.model_type)
+        # build test dataset 
+        dataset, _ = self.build_data_loader(args, args.evaluation_data_type, tokenizer=False)
+        test_instances = dataset.data
+       
+        # build attacker
+        attacker = self.build_attacker(args)
+
         attacker_log_path = '{}'.format(args.build_logging_path())
         attacker_log_path = os.path.join(args.logging_dir, attacker_log_path)
-        attacker = self.build_attacker(args)
-        test_instances = self.data_reader.get_instances(args.dataset_dir, args.evaluation_data_type, 'dev')
-        
-        results = self.model_wrapper([instance.text_a for instance in test_instances])
-        pred_list = np.argmax(results, axis=1).tolist()
-        gold_list = [self.data_reader.get_label_to_idx(instance.label) for instance in test_instances]
-        pred_true_list = [index for index, (pred, gold) in enumerate(zip(pred_list, gold_list)) if pred == gold]
-        print("Accuracy: {:.2f}%".format(len(pred_true_list) * 100.0 / len(gold_list)))
-        logging.info("Accuracy: {:.2f}%".format(len(pred_true_list) * 100.0 / len(gold_list)))
-
-
-        is_nli_task = True if test_instances[0].text_b is not None else False
-
         attacker_log_manager = AttackLogManager()
         # attacker_log_manager.enable_stdout()
         attacker_log_manager.add_output_file(os.path.join(attacker_log_path, '{}.txt'.format(args.attack_method)))
+        
         for i in range(args.attack_times):
             print("Attack time {}".format(i))
-                       
+            
             choice_instances = np.random.choice(test_instances, size=(args.attack_numbers,),replace=False)
-            if is_nli_task:
-                dataset = [[instance.text_a, instance.text_b, self.data_reader.get_label_to_idx(instance.label)] for instance in choice_instances]
-            else:
-                dataset = [(instance.text_a, self.data_reader.get_label_to_idx(instance.label)) for instance in choice_instances]
-            # dataset = [InputInstance("None", instance.text_a, 
-            #                         instance.text_b,
-            #                         self.data_reader.get_label_to_idx(instance.label)) for instance in choice_instances]
-            dataset = CustomTextAttackDataset.from_instances(args.dataset_name, dataset,self.data_reader.get_labels())
-
+            dataset = CustomTextAttackDataset.from_instances(args.dataset_name, choice_instances, self.data_reader.get_labels())
             results_iterable = attacker.attack_dataset(dataset)
-            num_successes = 0
-            num_failures = 0
-            all_numbers = 0
             description = tqdm(results_iterable, total=len(choice_instances))
+            result_statistics = SimplifidResult()
             for result in description:
                 try:
                     attacker_log_manager.log_result(result)
-                    if isinstance(result, SuccessfulAttackResult):
-                        num_successes += 1
-                    elif isinstance(result, FailedAttackResult):
-                        num_failures += 1
-                    all_numbers += 1
-
-                    pred_correct_nums = num_successes + num_failures
-                    if pred_correct_nums == 0:
-                        description.set_description('Succ Rate:{:.2f}%, Accu: {:.2f}%'.format(0.0, num_failures / all_numbers * 100))
-                    else:
-                        description.set_description('Succ Rate:{:.2f}%, Accu: {:.2f}%'.format(num_successes / pred_correct_nums * 100, num_failures / all_numbers * 100))
+                    result_statistics(result)
+                    description.set_description(result_statistics.__str__())
                 except RuntimeError as e:
                     print('error in process')
 
@@ -360,59 +362,157 @@ class Classifier:
         attacker_log_manager.log_summary()
 
     def augmentation(self, args: ClassifierArgs, **kwargs):
-        pass
-        # self.loading_model_from_file(args.saving_dir, args.build_saving_file_name(description='best'))
-        # self.model.eval()
+        self.loading_model_from_file(args.saving_dir, args.build_saving_file_name(description='best'))
+        self.model.eval()
 
-        # train_instances = self.data_reader.get_instances(args.dataset_dir, 'train', 'train')
-        # print('Training Set: {} sentences. '.format(len(train_instances)))
+        train_instances, _ = self.build_data_loader(args, 'train', tokenizer=False)
+        train_dataset_len = len(train_instances.data)
+        print('Training Set: {} sentences. '.format(train_dataset_len))
+        
+        # delete instance whose length is smaller than 3
+        train_instances_deleted = [instance for instance in train_instances.data if instance.length() >= 3]
+        dataset_to_aug = np.random.choice(train_instances_deleted, size=(int(train_dataset_len * 0.5), ), replace=False)
 
+        dataset_to_write = np.random.choice(train_instances.data, size=(int(train_dataset_len * 0.5), ), replace=False).tolist()
+        attacker = self.build_attacker(args)
+        attacker_log_manager = AttackLogManager()
+        dataset = CustomTextAttackDataset.from_instances(args.dataset_name, dataset_to_aug, self.data_reader.get_labels())
+        results_iterable = attacker.attack_dataset(dataset)
+        aug_instances = []
+        for result, instance in tqdm(zip(results_iterable, dataset_to_aug), total=len(dataset)):
+            try:
+                adv_sentence = result.perturbed_text()
+                aug_instances.append(InputInstance.from_instance_and_perturb_sentence(instance, adv_sentence))
+            except:
+                print('one error happend, delete one instance')
 
-        # model = get_model(args.tokenizer_path,args.model_path, args.dataset)
-        # attacker = get_attacker(model, args.running_type, args.attacker_type)
-        # attacker_log_manager = AttackLogManager()
-        # writing_numbers = 0
-        # with open(args.augmentation_file_path, 'w', encoding='utf8') as file:
-        #     results_iterable = attacker.attack_dataset(dataset)
-        #     for dataset, result in tqdm(zip(dataset, results_iterable),total=len(dataset)):
-        #         clean_sentence = result.original_text()
-        #         adv_sentence = result.perturbed_text()
-        #         label = dataset[1]
-        #         file.write('{}\t{}\n'.format(clean_sentence, label))
-        #         writing_numbers += 1
-        #         file.write('{}\t{}\n'.format(adv_sentence, label))
-        #         writing_numbers += 1
-        # print('Writing {} Sentence to {}'.format(writing_numbers, args.augmentation_file_path))
-        # attacker_log_manager.enable_stdout()
-        # attacker_log_manager.log_summary()
-
-        # predictor = Predictor(self.model, self.data_processor, args.)
-        # attacker = self.build_attacker(args, predictor)
-
-        # train_instances = self.data_reader.get_instances(args.dataset_dir, 'train', 'train')
-        # aug_instances = []
-        # for instance in tqdm(train_instances):
-        #     aug_instance = attacker.augment(instance)
-        #     if aug_instance is not None:
-        #         aug_instance.set_guid('{}-aug'.format(instance.guid))
-        #         aug_instances.append(instance)
-        #         aug_instances.append(aug_instance)
-        #     else:
-        #         aug_instances.append(instance)
-        # self.data_reader.saving_instances(aug_instances, args.dataset_dir, 'aug')
-        # print('saving {} augmentation data successfully to {}'.format(len(aug_instances), os.path.join(args.dataset_dir, 'aug')))
-        # logging.info('saving {} augmentation data successfully to {}'.format(len(aug_instances), os.path.join(args.dataset_dir, 'aug')))
+        dataset_to_write.extend(aug_instances)
+        self.data_reader.saving_instances(dataset_to_write, args.dataset_dir, 'aug_{}'.format(args.attack_method))
+        print('Writing {} Sentence. '.format(len(dataset_to_write)))
+        attacker_log_manager.enable_stdout()
+        attacker_log_manager.log_summary()
 
 
     def certify(self, args: ClassifierArgs, **kwargs):
-        pass
+        # self.evaluate(args, is_training=False)
+        self.loading_model_from_file(args.saving_dir, args.build_saving_file_name(description='best'))
+        self.model.eval()
+        predictor = Predictor(self.model, self.data_processor, args.model_type)
 
-    def saving_model_by_epoch(self, args:ClassifierArgs, epoch: int):
+        dataset, _ = self.build_data_loader(args, args.evaluation_data_type, tokenizer=False)
+        assert isinstance(dataset, ListDataset)
+        if args.certify_numbers == -1:
+            certify_dataset = dataset.data
+        else:
+            certify_dataset = np.random.choice(dataset.data, size=(args.certify_numbers, ), replace=False)
+        
+        description = tqdm(certify_dataset)
+        num_labels = self.data_reader.NUM_LABELS
+        metric = RandomAblationCertifyMetric() 
+        for data in description:
+            target = self.data_reader.get_label_to_idx(data.label)
+            data_length = data.length()
+            keep_nums = data_length - round(data_length * args.sparse_mask_rate)
+
+            tmp_instances = self.mask_instance_decorator(args, data, args.predict_ensemble)
+            tmp_probs = predictor.predict_batch(tmp_instances)
+            guess = np.argmax(np.bincount(np.argmax(tmp_probs, axis=-1), minlength=num_labels))
+
+            if guess != target:
+                metric(np.nan, data_length)
+                continue
+                
+            tmp_instances = self.mask_instance_decorator(args, data, args.ceritfy_ensemble)
+            tmp_probs = predictor.predict_batch(tmp_instances)
+            guess_counts = np.bincount(np.argmax(tmp_probs, axis=-1), minlength=num_labels)[guess]
+            lower_bound, upper_bound = lc_bound(guess_counts, args.ceritfy_ensemble, args.alpha)
+            if args.certify_lambda:
+                # tmp_instances, mask_indexes = mask_instance(data, args.sparse_mask_rate, self.tokenizer.mask_token,nums=args.ceritfy_ensemble * 2, return_indexes=True)
+                # tmp_probs = predictor.predict_batch(tmp_instances)
+                # tmp_preds = np.argmax(tmp_probs, axis=-1)
+                # ablation_indexes = [list(set(list(range(data_length))) - set(indexes.tolist())) for indexes in mask_indexes]
+                # radius = population_radius_for_majority_by_estimating_lambda(lower_bound, data_length, keep_nums, tmp_preds, ablation_indexes, num_labels, guess, samplers = 200)
+                radius = population_radius_for_majority(lower_bound, data_length, keep_nums, lambda_value=guess_counts / args.ceritfy_ensemble)
+            else:
+                radius = population_radius_for_majority(lower_bound, data_length, keep_nums)
+            
+            metric(radius, data_length)
+
+            result = metric.get_metric()
+            description.set_description("Accu: {:.2f}%, Median: {}".format(result['accuracy'] * 100, result['median']))
+        print(metric)
+        logging.info(metric)
+
+        # logging metric certify_radius and length
+        logging.info(metric.certify_radius())
+        logging.info(metric.sentence_length())
+
+
+    def statistics(self, args: ClassifierArgs, **kwargs):
+        # self.evaluate(args, is_training=False)
+        self.loading_model_from_file(args.saving_dir, args.build_saving_file_name(description='best'))
+        self.model.eval()
+        predictor = Predictor(self.model, self.data_processor, args.model_type)
+
+        dataset, _ = self.build_data_loader(args, args.evaluation_data_type, tokenizer=False)
+        assert isinstance(dataset, ListDataset)
+        if args.certify_numbers == -1:
+            certify_dataset = dataset.data
+        else:
+            certify_dataset = np.random.choice(dataset.data, size=(args.certify_numbers, ), replace=False)
+        
+        description = tqdm(certify_dataset)
+        num_labels = self.data_reader.NUM_LABELS
+        metric = RandomAblationCertifyMetric() 
+        result_dicts = {"pix": []}
+        for i in range(11):
+            result_dicts[str(i)] = list()
+        for data in description:
+            target = self.data_reader.get_label_to_idx(data.label)
+            data_length = data.length()
+            keep_nums = data_length - round(data_length * args.sparse_mask_rate)
+
+            tmp_instances = self.mask_instance_decorator(args, data, args.predict_ensemble)
+            tmp_probs = predictor.predict_batch(tmp_instances)
+            guess = np.argmax(np.bincount(np.argmax(tmp_probs, axis=-1), minlength=num_labels))
+
+            if guess != target:
+                metric(np.nan, data_length)
+                continue
+
+            numbers = args.ceritfy_ensemble * 2                
+            tmp_instances, mask_indexes = self.mask_instance_decorator(args, data, numbers, return_indexes=True)
+            ablation_indexes = [list(set(list(range(data_length))) - set(indexes)) for indexes in mask_indexes]
+            tmp_probs = predictor.predict_batch(tmp_instances)
+            tmp_preds = np.argmax(tmp_probs, axis=-1)
+            p_i_x = np.bincount(tmp_preds, minlength=num_labels)[guess] / numbers
+            result_dicts["pix"].append(p_i_x)
+            for i in range(1, 11):
+                lambda_value = population_lambda(tmp_preds, ablation_indexes, data_length, i, num_labels, guess)
+                result_dicts[str(i)].append(lambda_value)
+        
+        file_name = os.path.join(args.logging_dir, "{}-probs.txt".format(args.build_logging_path()))
+        with open(file_name, 'w') as file:
+            for key, value in result_dicts.items():
+                file.write(key)
+                file.write(":  ")
+                file.write(" ".join([str(v) for v in value]))
+                file.write("\n")
+
+    def saving_model_by_epoch(self, args: ClassifierArgs, epoch: int):
         # saving
         if args.saving_step is not None and args.saving_step != 0:
             if (epoch - 1) % args.saving_step == 0:
                 self.save_model_to_file(args.saving_dir,
                                         args.build_saving_file_name(description='epoch{}'.format(epoch)))
+
+
+    def mask_instance_decorator(self, args: ClassifierArgs, instance:InputInstance, numbers:int=1, return_indexes:bool=False):
+        if self.forbidden_words is not None:
+            forbidden_index = mask_forbidden_index(instance.perturbable_sentence(), self.forbidden_words)
+            return mask_instance(instance, args.sparse_mask_rate, self.tokenizer.mask_token, numbers, return_indexes, forbidden_index)
+        else:
+            return mask_instance(instance, args.sparse_mask_rate, self.tokenizer.mask_token, numbers, return_indexes)
 
 
     @classmethod
@@ -429,6 +529,9 @@ class Classifier:
 
         args.build_saving_dir()
         args.build_caching_dir()
+
+        if args.dataset_name in ['agnews', 'snli']:
+            args.keep_sentiment_word = False
 
         classifier = cls(args)
         classifier.methods[args.mode](args)

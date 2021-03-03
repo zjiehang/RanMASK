@@ -5,3 +5,4 @@ from .hotflip import HotflipTrainer
 from .metric import EmbeddingLevelMetricTrainer, TokenLevelMetricTrainer
 from .rep_learning import RepresentationLearningTrainer
 from .mask import MaskTrainer
+from .safer import SAFERTrainer

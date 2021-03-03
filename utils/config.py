@@ -7,6 +7,8 @@ from transformers import RobertaConfig, RobertaForSequenceClassification, Robert
 from utils.metrics import ClassificationMetric
 from data.reader import *
 
+class CONFIG:
+    ABSTAIN_FLAG = -1
 
 class PRETRAINED_MODEL_TYPE:
     MODEL_CLASSES = {
@@ -20,6 +22,10 @@ class PRETRAINED_MODEL_TYPE:
 
 
 class DATASET_TYPE:
+    # TEXT_CLASSIFIER_TASK = 'classifier'
+    # SENTIMENT_ANALYSIS_TASK = 'sentiment'
+    # TEXT_ENTAILMENT_TASK = 'entailment'
+
     # for data reader for each task
     DATA_READER = {
         'sst2': BinarySentimentAnalysisDataReader,
@@ -28,6 +34,19 @@ class DATASET_TYPE:
         'mr': BinarySentimentAnalysisDataReader,
         'snli': SnliDataReader
     }
+
+    # TASK = {
+    #     'sst2': SENTIMENT_ANALYSIS_TASK,
+    #     'imdb': SENTIMENT_ANALYSIS_TASK,
+    #     'agnews': TEXT_CLASSIFIER_TASK,
+    #     'mr': SENTIMENT_ANALYSIS_TASK,
+    #     'snli': TEXT_ENTAILMENT_TASK
+    # }
+
+    # @staticmethod
+    # def get_task(dataset):
+    #     assert dataset in DATASET_TYPE.TASK.keys()
+    #     return DATASET_TYPE.TASK[dataset]
 
     @staticmethod
     def get_loss_function(dataset: str, reduction='none'):

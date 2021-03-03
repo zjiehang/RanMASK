@@ -2,6 +2,7 @@ import os
 import csv
 import json
 from typing import List
+from overrides import overrides
 from data.instance import InputInstance
 
 '''
@@ -13,13 +14,13 @@ class DataReader(object):
     OUTPUT_MODE = 'classification'
     FILE_EXTENSION_TYPE = None
 
-    def get_instances(self, data_dir: str, data_type: str):
+    def get_instances(self, data_dir: str, file_name: str):
         assert self.FILE_EXTENSION_TYPE is not None
-        file_path = os.path.join(data_dir, '{}.{}'.format(data_type, self.FILE_EXTENSION_TYPE))
+        file_path = os.path.join(data_dir, '{}.{}'.format(file_name, self.FILE_EXTENSION_TYPE))
         if self.FILE_EXTENSION_TYPE == 'json':
-            return self.create_instances(self._read_json(file_path), data_type)
+            return self.create_instances(self._read_json(file_path), file_name)
         else:
-            return self.create_instances(self._read_tsv(file_path), data_type)
+            return self.create_instances(self._read_tsv(file_path), file_name)
 
     def get_labels(self):
         """Gets the list of labels for this data set."""
@@ -29,7 +30,9 @@ class DataReader(object):
         raise NotImplementedError()
 
     def saving_instances(self, instances, data_dir, data_file):
-        raise NotImplementedError()
+        with open(os.path.join(data_dir, '{}.{}'.format(data_file, self.FILE_EXTENSION_TYPE)),'w', encoding='utf-8') as file:
+            for instance in instances:
+                file.write('{}\t{}\n'.format(instance.text_a, self.get_label_to_idx(instance.label)))
 
     def get_label_to_idx(self, label) -> int:
         label_list = self.get_labels()
@@ -78,6 +81,7 @@ class SnliDataReader(DataReader):
             instances.append(InputInstance(guid="{}-{}".format(set_type,i), text_a=text_a, text_b=text_b, label=label))
         return instances
 
+    @overrides
     def saving_instances(self, instances: List[InputInstance], data_dir: str, data_file: str):
         with open(os.path.join(data_dir, '{}.tsv'.format(data_file)),'w', encoding='utf-8') as file:
             for instance in instances:
@@ -101,11 +105,6 @@ class BinarySentimentAnalysisDataReader(DataReader):
             instances.append(InputInstance(guid=guid, text_a=text_a, text_b=None, label=label))
         return instances
 
-    def saving_instances(self, instances: List[InputInstance], data_dir: str, data_file: str):
-        with open(os.path.join(data_dir, '{}.txt'.format(data_file)),'w', encoding='utf-8') as file:
-            for instance in instances:
-                file.write('{}\t{}\n'.format(instance.text_a, instance.label[2:]))
-
 
 class AgnewsReader(DataReader):
     NUM_LABELS = 4
@@ -123,8 +122,3 @@ class AgnewsReader(DataReader):
             label = "10" + label
             instances.append(InputInstance(guid=guid, text_a=text_a, text_b=None, label=label))
         return instances
-
-    def saving_instances(self, instances: List[InputInstance], data_dir: str, data_file: str):
-        with open(os.path.join(data_dir, '{}.txt'.format(data_file)), 'w', encoding='utf-8') as file:
-            for instance in instances:
-                file.write('{}\t{}\n'.format(instance.text_a, instance.label[2:]))
