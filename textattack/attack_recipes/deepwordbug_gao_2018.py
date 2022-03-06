@@ -35,7 +35,7 @@ class DeepWordBugGao2018(AttackRecipe):
     """
 
     @staticmethod
-    def build(model, use_all_transformations=True, ensemble: bool=False):
+    def build(model, use_all_transformations=True):
         #
         # Swap characters out from words. Choose the best of four potential transformations.
         #
@@ -74,6 +74,6 @@ class DeepWordBugGao2018(AttackRecipe):
         #
         # Greedily swap words with "Word Importance Ranking".
         #
-        search_method = GreedyWordSwapWIR(ensemble=ensemble)
+        search_method = GreedyWordSwapWIR()
 
         return Attack(goal_function, constraints, transformation, search_method)

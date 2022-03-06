@@ -10,21 +10,19 @@ from baseargs import ProgramArgs
 class ClassifierArgs(ProgramArgs):
     def __init__(self):
         super(ClassifierArgs, self).__init__()
-        # in ['train', 'attack', 'evaluate', 'certify', 'statistics']
-        self.mode = 'attack' 
-        self.file_name = None
+        self.mode = 'attack'  # in ['train', 'attack', 'evaluate', 'certify', 'statistics']
+        self.file_name = None   #  filename of the saved model, default is None. See build_saving_file_name()
 
-        self.seed = None
-        # for evaluate and predict, default is 'test', meaning test set
-        self.evaluation_data_type = 'test'
+        self.seed = None    # for seed of all random function(including, np.random, random, torch, so on.)
+        self.evaluation_data_type = 'test'  # default is 'test', meaning using test set to evaluate
 
-        self.dataset_name = 'agnews'
-        self.dataset_dir = '/home/zjiehang/SparseNLP/dataset'
+        self.dataset_name = 'sst2'
+        self.dataset_dir = '/home/zjiehang/RanMASK/dataset'
         self.model_type = 'roberta'
-        self.model_name_or_path = '/home/zjiehang/SparseNLP/pretrained/roberta-base-english'
+        self.model_name_or_path = 'roberta-base'
 
-        # for processing data 
-        self.max_seq_length = 128
+        # for processing data
+        self.max_seq_length = 128       # the maximum length of input text to be truncated, for imdb, recommends 256; else, 128
         self.do_lower_case = True
 
         # base training hyper-parameters, if need other, define in subclass
@@ -43,27 +41,31 @@ class ClassifierArgs(ProgramArgs):
         # e.g., when X == '-loss', using loss to compare which epoch is best
         self.compare_key = '+accuracy'
 
-        # saving, logging and caching
-        self.caching_dir = '/home/zjiehang/SparseNLP/cache_path'  # for cache path
-        self.saving_dir = '/home/zjiehang/SparseNLP/save_models'  # for saving modeling
-        self.logging_dir = '/home/zjiehang/SparseNLP/result_log'  # for logging
+        # saving, logging and caching dir
+        self.caching_dir = '/home/zjiehang/RanMASK/cache_path'  # for cache path
+        self.saving_dir = '/home/zjiehang/RanMASK/save_models'  # for saving modeling
+        self.logging_dir = '/home/zjiehang/RanMASK/result_log'  # for logging
         self.saving_step = 0  # saving step for epoch
 
         self.tensorboard = None
 
-        # training loss type, only support 'freelb', 'conat'  'pgd',  'hotflip', 'metric', 'metric_token', 'sparse', 'safer' now
-        # default is None, meaning normal training
-        self.training_type = 'sparse'
+        # the type to train models, only support 'freelb',  'pgd',  'hotflip', 'sparse', 'safer' now
+        # See build_trainer in classifier.py
+        # default is '', meaning normal training
+        # freelb: FreeLB: Enhanced adversarial training for natural language understanding
+        # pgd: Towards deep learning models resistant to adversarial attacks.
+        # hotflip: HotFlip: White-box adversarial examples for text classification
+        # safer: A structure-free approach for certified robustness to adversarial word substitutions. 
+        # sparse: for RanMASK. Certified Robustness to Text Adversarial Attacks by Randomized [MASK]
+        self.training_type = ''
 
-        # for sparse adversarial training in NLP
-        self.sparse_mask_rate = 0.7
-
-        # for predict on sparse NLP
-        self.predict_ensemble = 100
-        self.predict_numbers = 1000 # default is None, meaning all dataset is used to evaluate
-        # for certify on sparse NLP
-        self.ceritfy_ensemble = 5000
-        self.certify_numbers = 1000 # default is None, meaning all dataset is used to evaluate
+        # for RanMASK
+        self.sparse_mask_rate = 0.7 # the mask rate for RanMASK
+        self.predict_ensemble = 100 # the ensemble number for random smoothing (using for attack and predict)
+        self.predict_numbers = 1000 # Not used
+        # for certify on RanMASK
+        self.ceritfy_ensemble = 5000 # the ensemble number for random smoothing (using for certify). It is much larger than predict_ensemble, but slower.
+        self.certify_numbers = 1000 # the dataset size to certify. default is None, meaning all dataset is used to evaluate
         # whether to add lambda, for sparse NLP, 
         # pi(x)− Pr([f(ABLATE(x, T)) = i] ∧ [T ∩ (x diff with x')]) <= pi(x')
         # Pr([f(ABLATE(x, T)) = i] ∧ [T ∩ (x diff with x') != Ø]) = Pr([f(ABLATE(x, T)) = i] | [T ∩ (x diff with x')  != Ø]) * Pr(T ∩ (x diff with x')  != Ø)
@@ -72,12 +74,8 @@ class ClassifierArgs(ProgramArgs):
         self.certify_lambda = True
         # for confidence alpha probability
         self.alpha = 0.05
-
-        # for attack
-        self.attack_times = 1 # attack times for average record
-        self.attack_method = 'textfooler' # attack algorithm
-        self.attack_numbers = 100 # the examples numbers to be attack
-        self.ensemble_method = 'votes' # in [votes mean]
+        # whether to use language model (lm) to decide the masking indexes when attacking. For empirical robustness, using lm is better.
+        self.with_lm = False
 
         # for pgd-K and FreeLB (including adv-hotflip)
         self.adv_steps = 3 # Number of gradient ascent steps for the adversary, for FreeLB default 5
@@ -85,25 +83,29 @@ class ClassifierArgs(ProgramArgs):
         self.adv_init_mag = 5e-1 # Magnitude of initial (adversarial?) perturbation, for FreeLB, default 0.05
         self.adv_max_norm = 5e-2 # adv_max_norm = 0 means unlimited, for FreeLB, default 0.0
         self.adv_norm_type = 'l2' # norm type of the adversary
-        self.adv_change_rate = 0.2 # rate for adv-hotflip, change rate of a sentence 
+        self.adv_change_rate = 0.2 # rate for adv-hotflip, change rate of a sentence
 
+        # for SAFER
+        self.safer_perturbation_set = 'perturbation_constraint_pca0.8_100.pkl'   # perturbation set path for safer trainer
+
+        # for attack
+        self.attack_times = 1 # attack times for average record
+        self.attack_method = 'pwws' # attack algorithm
+        self.attack_numbers = 100 # the examples numbers to be attack
+        self.ensemble_method = 'votes' # in [votes mean], the ensemble type, Ses RanMASK paper
+
+        # The following are some tricks that have been tried and used for training and can be ignored
         # for sentiment-word file path
-        self.sentiment_path = '/home/zjiehang/SparseNLP/dataset/sentiment_word/sentiment-words.txt'
+        self.sentiment_path = '/home/zjiehang/RanMASK/dataset/sentiment_word/sentiment-words.txt'
         # when keep_sentiment_word, keep sentiment words when training
         self.keep_sentiment_word = False
         # whether to add incremental trick, the mask rate increases with the global training step increasing.
         # the default initial mask rate is 0.4
         self.incremental_trick = False
-        self.initial_mask_rate = 0.6
-
+        self.initial_mask_rate = 0.4
         self.saving_last_epoch = False
 
-        self.with_lm = False
 
-        # perturbation set path for safer trainer
-        self.safer_perturbation_set = 'perturbation_constraint_pca0.8_100.pkl'
-
-        
     def build_environment(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         set_seed(self.seed)
@@ -125,7 +127,7 @@ class ClassifierArgs(ProgramArgs):
     # setting new saving path
     # the new saving path is combined by
     # args.saving_dir = args.saving_dir/${data}_${model}
-    def build_saving_dir(self):    
+    def build_saving_dir(self):
         self.saving_dir = os.path.join(self.saving_dir,  "{}_{}".format(self.dataset_name, self.model_type))
         check_and_create_path(self.saving_dir)
 

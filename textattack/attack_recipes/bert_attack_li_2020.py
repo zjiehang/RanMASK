@@ -30,7 +30,7 @@ class BERTAttackLi2020(AttackRecipe):
     """
 
     @staticmethod
-    def build(model, ensemble: bool = False):
+    def build(model):
         # [from correspondence with the author]
         # Candidate size K is set to 48 for all data-sets.
         transformation = WordSwapMaskedLM(method="bert-attack", max_candidates=48)
@@ -85,6 +85,6 @@ class BERTAttackLi2020(AttackRecipe):
         # is the sentence after replacing wi with [MASK]. Then we rank all the words
         # according to the ranking score Iwi in descending order to create word list
         # L."
-        search_method = GreedyWordSwapWIR(wir_method="unk", ensemble=ensemble)
+        search_method = GreedyWordSwapWIR(wir_method="unk")
 
         return Attack(goal_function, constraints, transformation, search_method)
